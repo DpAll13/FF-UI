@@ -8,6 +8,7 @@ local buffTable = require('bufftable');
 local hpText;
 local mpText;
 local tpText;
+local hpPctText;
 local resetPosNextFrame = false;
 
 local playerbar = {};
@@ -24,6 +25,7 @@ local function UpdateTextVisibility(visible)
 	hpText:SetVisible(visible);
 	mpText:SetVisible(visible);
 	tpText:SetVisible(visible);
+	hpPctText:SetVisible(visible);
 end
 
 playerbar.DrawWindow = function(settings)
@@ -166,8 +168,10 @@ playerbar.DrawWindow = function(settings)
 			imgui.SameLine();
 		end
 		
-		progressbar.ProgressBar(hpPercentData, {barSize, settings.barHeight}, {decorate = gConfig.showPlayerBarBookends});
+		local hpBarLocX, hpBarLocY = imgui.GetCursorScreenPos();
+
 		
+		progressbar.ProgressBar(hpPercentData, {barSize, settings.barHeight}, {decorate = gConfig.showPlayerBarBookends});
 		imgui.SameLine();
 		local hpEndX = imgui.GetCursorPosX();
 		local hpLocX, hpLocY = imgui.GetCursorScreenPos();	
@@ -222,6 +226,21 @@ playerbar.DrawWindow = function(settings)
 
 		local tpLocX, tpLocY  = imgui.GetCursorScreenPos();
 		
+
+		-- Update our HP% Text (inside bar, right of left bookend)
+		do
+			local fh = settings.font_settings.font_height or 12;
+			-- Tuned inset to sit just inside the left cap / bookend
+			local leftInset = (settings.barHeight * 1.90) + 9;
+			local pctStr = string.format('%d%%', SelfHPPercent);
+
+			hpPctText:SetText(pctStr);
+			hpPctText:SetPositionX(hpBarLocX + leftInset);
+			hpPctText:SetPositionY(hpLocY + settings.barHeight + settings.textYOffset);
+			hpPctText:SetColor(0xFFFFFFFF);
+			hpPctText:SetVisible(true);
+		end
+
 		-- Update our HP Text
 		hpText:SetPositionX(hpLocX - settings.barSpacing - settings.barHeight / 2);
 		hpText:SetPositionY(hpLocY + settings.barHeight + settings.textYOffset);
@@ -261,12 +280,14 @@ playerbar.Initialize = function(settings)
     hpText = fonts.new(settings.font_settings);
 	mpText = fonts.new(settings.font_settings);
 	tpText = fonts.new(settings.font_settings);
+	hpPctText = fonts.new(settings.font_settings);
 end
 
 playerbar.UpdateFonts = function(settings)
     hpText:SetFontHeight(settings.font_settings.font_height);
 	mpText:SetFontHeight(settings.font_settings.font_height);
 	tpText:SetFontHeight(settings.font_settings.font_height);
+	hpPctText:SetFontHeight(settings.font_settings.font_height);
 end
 
 playerbar.SetHidden = function(hidden)
