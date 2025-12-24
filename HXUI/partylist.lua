@@ -81,6 +81,7 @@ local function UpdateTextVisibilityByMember(memIdx, visible)
     memberText[memIdx].mp:SetVisible(visible);
     memberText[memIdx].tp:SetVisible(visible);
     memberText[memIdx].name:SetVisible(visible);
+    memberText[memIdx].hpPct:SetVisible(visible);
 end
 
 local function UpdateTextVisibility(visible, partyIndex)
@@ -234,7 +235,17 @@ local function DrawMember(memIdx, settings)
     local scale = getScale(partyIndex);
     local showTP = showPartyTP(partyIndex);
 
-    local subTargetActive = GetSubTargetActive();
+    
+
+    -- Row spacing between members (prevents overlap in Party B/C).
+    local rowSpacing = 0;
+    if (settings.entrySpacing ~= nil and settings.entrySpacing[partyIndex] ~= nil) then
+        rowSpacing = settings.entrySpacing[partyIndex];
+    end
+    if (partyIndex > 1) then
+        rowSpacing = rowSpacing + 10;
+    end
+local subTargetActive = GetSubTargetActive();
     local nameSize = SIZE.new();
     local hpSize = SIZE.new();
     memberText[memIdx].name:GetTextSize(nameSize);
@@ -274,6 +285,20 @@ local function DrawMember(memIdx, settings)
     memberText[memIdx].hp:SetPositionX(hpStartX + hpBarWidth + settings.hpTextOffsetX);
     memberText[memIdx].hp:SetPositionY(hpStartY + barHeight + settings.hpTextOffsetY);
     memberText[memIdx].hp:SetText(tostring(memInfo.hp));
+
+-- Update the hp% text (left side under the HP bar)
+local hpPct = 0;
+if (memInfo.hpp ~= nil) then
+    hpPct = math.floor((memInfo.hpp * 100) + 0.5);
+end
+memberText[memIdx].hpPct:SetColor(0xFFFFFFFF);
+-- Place inside the bar footprint, just to the right of the left bookend/cap.
+-- Anchor HP% under the left bookend/cap (fixed left alignment)
+local leftPad = 2;
+memberText[memIdx].hpPct:SetPositionX(hpStartX + leftPad);
+memberText[memIdx].hpPct:SetPositionY(hpStartY + barHeight + settings.hpTextOffsetY);
+memberText[memIdx].hpPct:SetText(string.format('%d%%', hpPct));
+
 
     -- Draw the HP bar
     if (memInfo.inzone) then
@@ -460,11 +485,12 @@ local function DrawMember(memIdx, settings)
     memberText[memIdx].hp:SetVisible(memInfo.inzone);
     memberText[memIdx].mp:SetVisible(memInfo.inzone);
     memberText[memIdx].tp:SetVisible(memInfo.inzone and showTP);
+    memberText[memIdx].hpPct:SetVisible(memInfo.inzone);
 
     if (memInfo.inzone) then
-        imgui.Dummy({0, settings.entrySpacing[partyIndex] + hpSize.cy + settings.hpTextOffsetY + settings.nameTextOffsetY});
+        imgui.Dummy({0, rowSpacing + hpSize.cy + settings.hpTextOffsetY + settings.nameTextOffsetY});
     else
-        imgui.Dummy({0, settings.entrySpacing[partyIndex] + settings.nameTextOffsetY});
+        imgui.Dummy({0, rowSpacing + settings.nameTextOffsetY});
     end
 
     local lastPlayerIndex = (partyIndex * 6) - 1;
@@ -696,6 +722,8 @@ partyList.Initialize = function(settings)
         memberText[i].hp = fonts.new(hp_font_settings);
         memberText[i].mp = fonts.new(mp_font_settings);
         memberText[i].tp = fonts.new(tp_font_settings);
+        memberText[i].hpPct = fonts.new(hp_font_settings);
+        memberText[i].hpPct:SetRightJustified(false);
     end
 
     -- Initialize images
@@ -759,6 +787,7 @@ partyList.UpdateFonts = function(settings)
         memberText[i].hp:SetFontHeight(hp_font_settings_font_height);
         memberText[i].mp:SetFontHeight(mp_font_settings_font_height);
         memberText[i].tp:SetFontHeight(tp_font_settings_font_height);
+        memberText[i].hpPct:SetFontHeight(hp_font_settings_font_height);
     end
 
     -- Update images
