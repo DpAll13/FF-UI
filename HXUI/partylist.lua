@@ -43,6 +43,64 @@ local loadedBg = nil;
 local partyList = {};
 
 
+-- Entity index cache / throttled resolver (performance optimization)
+-- Some party memory implementations may not populate GetMemberTargetIndex consistently.
+-- When that happens, we resolve the entity index by server id via a scan, but we cache results
+-- and throttle rescans to avoid per-frame full-table iteration.
+local _dist_entity_cache = {}; -- [serverId] = { idx = number, ts = number }
+local _dist_entity_cache_ttl_sec = 5.0;       -- revalidate cached index periodically
+local _dist_entity_scan_throttle_sec = 0.25;  -- minimum time between scans per serverId
+local _dist_entity_max_index = 2303;
+
+local function _now_sec()
+    -- os.clock() is monotonic CPU-time based; adequate for throttling and cache aging.
+    return os.clock();
+end
+
+local function _resolve_entity_index_by_server_id(entity, serverId)
+    if (serverId == nil or serverId == 0 or entity == nil or entity.GetServerId == nil) then
+        return nil;
+    end
+
+    local t = _now_sec();
+    local c = _dist_entity_cache[serverId];
+
+    -- Fast path: cached index still matches this server id.
+    if (c ~= nil and c.idx ~= nil and c.idx >= 0) then
+        if (entity:GetServerId(c.idx) == serverId) then
+            -- Periodically revalidate; otherwise accept.
+            if (c.ts ~= nil and (t - c.ts) <= _dist_entity_cache_ttl_sec) then
+                return c.idx;
+            end
+            -- Revalidated by read above; bump timestamp.
+            c.ts = t;
+            return c.idx;
+        else
+            -- Cached index no longer matches; invalidate.
+            _dist_entity_cache[serverId] = { idx = nil, ts = t };
+        end
+    end
+
+    -- Throttle scans per serverId.
+    if (c ~= nil and c.ts ~= nil and (t - c.ts) < _dist_entity_scan_throttle_sec) then
+        return nil;
+    end
+
+    -- Scan entity table for server id.
+    local found = nil;
+    for i = 0, _dist_entity_max_index do
+        if (entity:GetServerId(i) == serverId) then
+            found = i;
+            break;
+        end
+    end
+
+    _dist_entity_cache[serverId] = { idx = found, ts = t };
+    return found;
+end
+
+
+
 local function getScale(partyIndex)
     if (partyIndex == 3) then
         return {
@@ -75,6 +133,108 @@ local function showPartyTP(partyIndex)
     end
 end
 
+
+local function GetMemberDistanceYalms(memIdx, memInfo)
+    -- Returns distance in yalms (number) or nil if unavailable.
+    -- Uses party target index to resolve entity positions.
+    if (showConfig[1] and gConfig.partyListPreview) then
+        return memInfo ~= nil and memInfo.dist or nil;
+    end
+
+    if (memInfo == nil or memInfo.inzone ~= true) then
+        return nil;
+    end
+
+    local party = AshitaCore:GetMemoryManager():GetParty();
+    local player = AshitaCore:GetMemoryManager():GetPlayer();
+    local entity = AshitaCore:GetMemoryManager():GetEntity();
+    if (party == nil or player == nil or entity == nil) then
+        return nil;
+    end
+
+    local meIndex = nil;
+    if (entity.GetLocalPlayerIndex ~= nil) then
+        meIndex = entity:GetLocalPlayerIndex();
+    end
+    -- Fallback: Use party slot 0 target index if local index is unavailable.
+    if (meIndex == nil or meIndex < 0) then
+        meIndex = party:GetMemberTargetIndex(0);
+    end
+    local memberIndex = party:GetMemberTargetIndex(memIdx);
+
+    -- Fallback: Some party memory implementations may not populate target index consistently.
+    -- If target index is unavailable, resolve the entity index by server id using a cached / throttled scan.
+    if (memberIndex == nil or memberIndex < 0) then
+        local sid = party:GetMemberServerId(memIdx);
+        memberIndex = _resolve_entity_index_by_server_id(entity, sid);
+    end
+
+    if (meIndex == nil or meIndex < 0 or memberIndex == nil or memberIndex < 0) then
+        return nil;
+    end
+
+    -- Preferred: Use the entities distance value (matches Ashita's /distance addon behavior).
+    -- This is typically the squared distance between you and the entity in yalms^2.
+    local ent = nil;
+    if (_G.GetEntity ~= nil) then
+        ent = GetEntity(memberIndex);
+    end
+    if (ent ~= nil and ent.Distance ~= nil) then
+        return math.sqrt(ent.Distance);
+    end
+
+    -- Fallback: Compute from positions. (Less reliable across servers/clients; keep as a backup.)
+    local function get_pos(idx)
+        if (entity.GetPositionX ~= nil and entity.GetPositionY ~= nil and entity.GetPositionZ ~= nil) then
+            return entity:GetPositionX(idx), entity:GetPositionY(idx), entity:GetPositionZ(idx);
+        end
+        if (entity.GetLocalPositionX ~= nil and entity.GetLocalPositionY ~= nil and entity.GetLocalPositionZ ~= nil) then
+            return entity:GetLocalPositionX(idx), entity:GetLocalPositionY(idx), entity:GetLocalPositionZ(idx);
+        end
+        return nil, nil, nil;
+    end
+
+    local mx, my, mz = get_pos(meIndex);
+    local px, py, pz = get_pos(memberIndex);
+    if (mx == nil or my == nil or mz == nil or px == nil or py == nil or pz == nil) then
+        return nil;
+    end
+
+    local dx = (px - mx);
+    local dy = (py - my);
+    local dz = (pz - mz);
+    return math.sqrt((dx * dx) + (dy * dy) + (dz * dz));
+end
+
+-- Returns an ARGB color for the distance value, or nil to indicate the distance should be hidden.
+-- Ranges:
+--   0.0  -  5.0  : green
+--   >5.0 - 10.0  : blue
+--   >10.0- 15.0  : yellow
+--   >15.0- 20.0  : orange
+--   >20.0- 24.9  : red
+--   >24.9 or invalid: hide
+local function GetDistanceColor(dist)
+    if (dist == nil or dist < 0) then
+        return nil;
+    end
+
+    if (dist <= 5.0) then
+        return 0xFF00FF00; -- green
+    elseif (dist <= 10.0) then
+        return 0xFF0080FF; -- blue
+    elseif (dist <= 15.0) then
+        return 0xFFFFFF00; -- yellow
+    elseif (dist <= 20.0) then
+        return 0xFFFFA500; -- orange
+    elseif (dist <= 24.9) then
+        return 0xFFFF0000; -- red
+    end
+
+    return nil;
+end
+
+
 local function UpdateTextVisibilityByMember(memIdx, visible)
 
     memberText[memIdx].hp:SetVisible(visible);
@@ -82,6 +242,7 @@ local function UpdateTextVisibilityByMember(memIdx, visible)
     memberText[memIdx].tp:SetVisible(visible);
     memberText[memIdx].name:SetVisible(visible);
     memberText[memIdx].hpPct:SetVisible(visible);
+    memberText[memIdx].dist:SetVisible(visible);
 end
 
 local function UpdateTextVisibility(visible, partyIndex)
@@ -130,6 +291,7 @@ local function GetMemberInformation(memIdx)
         memInfo.inzone = memIdx ~= 3;
         memInfo.name = 'Player ' .. (memIdx + 1);
         memInfo.leader = memIdx == 0 or memIdx == 6 or memIdx == 12;
+        memInfo.dist = memIdx == 0 and 0 or (8.0 + (memIdx * 1.5));
         return memInfo
     end
 
@@ -339,6 +501,11 @@ memberText[memIdx].hpPct:SetText(string.format('%d%%', hpPct));
         memberText[memIdx].mp:SetPositionY(mpStartY + barHeight + settings.mpTextOffsetY);
         memberText[memIdx].mp:SetText(tostring(memInfo.mp));
 
+
+        -- Distance anchor defaults to the MP number column (works even if TP bar is hidden).
+        local distAnchorX = (mpStartX + mpBarWidth + settings.mpTextOffsetX);
+        local distAnchorY = mpStartY;
+
         -- Draw the TP bar
         if (showTP) then
             imgui.SameLine();
@@ -369,7 +536,33 @@ memberText[memIdx].hpPct:SetText(string.format('%d%%', hpPct));
             memberText[memIdx].tp:SetPositionX(tpStartX + tpBarWidth + settings.tpTextOffsetX);
             memberText[memIdx].tp:SetPositionY(tpStartY + barHeight + settings.tpTextOffsetY);
             memberText[memIdx].tp:SetText(tostring(memInfo.tp));
+
+
+            -- If TP bar is shown, anchor distance above the TP bar (at the TP number column).
+            distAnchorX = (tpStartX + tpBarWidth + settings.tpTextOffsetX);
+            distAnchorY = tpStartY;
+
         end
+        -- Update the distance text (yalms) whenever the member is in-zone (TP bar not required).
+        -- Color rules (and visibility cutoff) are applied via GetDistanceColor.
+        local dist = GetMemberDistanceYalms(memIdx, memInfo);
+        local distColor = GetDistanceColor(dist);
+        if (dist ~= nil and distColor ~= nil) then
+            local distStr = string.format('%.1f', dist);
+            memberText[memIdx].dist:SetColor(distColor);
+            memberText[memIdx].dist:SetPositionX(distAnchorX);
+
+            -- Place just above the anchored bar.
+            local distSize = SIZE.new();
+            memberText[memIdx].dist:GetTextSize(distSize);
+            memberText[memIdx].dist:SetPositionY(distAnchorY - distSize.cy - 1);
+            memberText[memIdx].dist:SetText(distStr);
+            memberText[memIdx].dist:SetVisible(true);
+        else
+            memberText[memIdx].dist:SetVisible(false);
+        end
+
+
 
         -- Draw targeted
         local entrySize = hpSize.cy + offsetSize + settings.hpTextOffsetY + barHeight + settings.cursorPaddingY1 + settings.cursorPaddingY2;
@@ -486,6 +679,9 @@ memberText[memIdx].hpPct:SetText(string.format('%d%%', hpPct));
     memberText[memIdx].mp:SetVisible(memInfo.inzone);
     memberText[memIdx].tp:SetVisible(memInfo.inzone and showTP);
     memberText[memIdx].hpPct:SetVisible(memInfo.inzone);
+    if (not memInfo.inzone) then
+        memberText[memIdx].dist:SetVisible(false);
+    end
 
     if (memInfo.inzone) then
         imgui.Dummy({0, rowSpacing + hpSize.cy + settings.hpTextOffsetY + settings.nameTextOffsetY});
@@ -724,6 +920,8 @@ partyList.Initialize = function(settings)
         memberText[i].tp = fonts.new(tp_font_settings);
         memberText[i].hpPct = fonts.new(hp_font_settings);
         memberText[i].hpPct:SetRightJustified(false);
+        memberText[i].dist = fonts.new(tp_font_settings);
+        memberText[i].dist:SetRightJustified(true);
     end
 
     -- Initialize images
@@ -788,6 +986,7 @@ partyList.UpdateFonts = function(settings)
         memberText[i].mp:SetFontHeight(mp_font_settings_font_height);
         memberText[i].tp:SetFontHeight(tp_font_settings_font_height);
         memberText[i].hpPct:SetFontHeight(hp_font_settings_font_height);
+        memberText[i].dist:SetFontHeight(tp_font_settings_font_height);
     end
 
     -- Update images
